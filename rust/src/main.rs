@@ -43,11 +43,11 @@ fn main() -> bitcoincore_rpc::Result<()> {
 
     // Helper to call wallet-specific RPC
     let miner_rpc = Client::new(
-        &format!("{}/wallet/Miner", RPC_URL),
+        &format!("{RPC_URL}/wallet/Miner"),
         Auth::UserPass(RPC_USER.to_owned(), RPC_PASS.to_owned()),
     )?;
     let trader_rpc = Client::new(
-        &format!("{}/wallet/Trader", RPC_URL),
+        &format!("{RPC_URL}/wallet/Trader"),
         Auth::UserPass(RPC_USER.to_owned(), RPC_PASS.to_owned()),
     )?;
 
@@ -56,7 +56,7 @@ fn main() -> bitcoincore_rpc::Result<()> {
         let res = rpc.call::<serde_json::Value>("createwallet", &[json!(wallet)]);
         if let Err(e) = &res {
             if !e.to_string().contains("already exists") {
-                panic!("Failed to create wallet: {}", e);
+                panic!("Failed to create wallet: {e}");
             }
             // Try loading if not loaded
             let _ = rpc.call::<serde_json::Value>("loadwallet", &[json!(wallet)]);
@@ -86,7 +86,7 @@ fn main() -> bitcoincore_rpc::Result<()> {
     // Coinbase rewards are only spendable after 100 blocks (maturity)
     // This is to prevent chain reorganizations from invalidating coinbase spends.
 
-    println!("Blocks mined until positive balance: {}", blocks_mined);
+    println!("Blocks mined until positive balance: {blocks_mined}");
     println!("Miner wallet balance: {} BTC", miner_balance.to_btc());
 
     // 4. Generate Trader receiving address
@@ -95,12 +95,12 @@ fn main() -> bitcoincore_rpc::Result<()> {
     // 5. Send 20 BTC from Miner to Trader
     let txid =
         miner_rpc.call::<String>("sendtoaddress", &[json!(trader_addr.clone()), json!(20.0)])?;
-    println!("Sent 20 BTC from Miner to Trader. TXID: {}", txid);
+    println!("Sent 20 BTC from Miner to Trader. TXID: {txid}");
 
     // 6. Fetch unconfirmed transaction from mempool
     let mempool_entry =
         miner_rpc.call::<serde_json::Value>("getmempoolentry", &[json!(txid.clone())])?;
-    println!("Mempool entry: {:?}", mempool_entry);
+    println!("Mempool entry: {mempool_entry:?}");
 
     // 7. Mine 1 block to confirm transaction
     miner_rpc.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mining_addr.clone())])?;
@@ -177,16 +177,16 @@ fn main() -> bitcoincore_rpc::Result<()> {
 
     // 9. Write output to ../out.txt
     let mut file = File::create("../out.txt").expect("Unable to create out.txt");
-    writeln!(file, "{}", txid)?;
-    writeln!(file, "{}", miner_input_address)?;
-    writeln!(file, "{}", miner_input_amount)?;
-    writeln!(file, "{}", trader_output_address)?;
-    writeln!(file, "{}", trader_output_amount)?;
-    writeln!(file, "{}", miner_change_address)?;
-    writeln!(file, "{}", miner_change_amount)?;
-    writeln!(file, "{}", fee)?;
-    writeln!(file, "{}", blockheight)?;
-    writeln!(file, "{}", blockhash)?;
+    writeln!(file, "{txid}")?;
+    writeln!(file, "{miner_input_address}")?;
+    writeln!(file, "{miner_input_amount}")?;
+    writeln!(file, "{trader_output_address}")?;
+    writeln!(file, "{trader_output_amount}")?;
+    writeln!(file, "{miner_change_address}")?;
+    writeln!(file, "{miner_change_amount}")?;
+    writeln!(file, "{fee}")?;
+    writeln!(file, "{blockheight}")?;
+    writeln!(file, "{blockhash}")?;
 
     Ok(())
 }
