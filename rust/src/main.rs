@@ -66,14 +66,21 @@ fn main() -> bitcoincore_rpc::Result<()> {
     // 2. Generate address for mining reward in Miner wallet
     let mining_addr = miner_rpc.call::<String>("getnewaddress", &[json!("Mining Reward")])?;
 
-    // 3. Mine blocks until positive balance
+    // 3. Mine blocks until positive balance but only enough to have ONE large UTXO
     // Coinbase rewards require 100 blocks to mature before spendable
     let mut blocks_mined = 0;
     let mut miner_balance = miner_rpc.get_balance(None, None)?;
-    while miner_balance.to_btc() <= 0.0 {
+    
+    // Mine exactly 101 blocks to get one mature UTXO
+    while blocks_mined < 101 || miner_balance.to_btc() <= 0.0 {
         miner_rpc.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mining_addr.clone())])?;
         blocks_mined += 1;
         miner_balance = miner_rpc.get_balance(None, None)?;
+        
+        // Stop after 101 blocks to ensure we have only one spendable UTXO
+        if blocks_mined >= 101 && miner_balance.to_btc() > 0.0 {
+            break;
+        }
     }
     // Coinbase rewards are only spendable after 100 blocks (maturity)
     // This is to prevent chain reorganizations from invalidating coinbase spends.
@@ -95,33 +102,60 @@ fn main() -> bitcoincore_rpc::Result<()> {
     // 7. Mine 1 block to confirm transaction
     miner_rpc.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mining_addr.clone())])?;
 
-    // 8. Extract transaction details
+    // 8. Extract transaction details with proper error handling
     let tx_info = miner_rpc.call::<serde_json::Value>("gettransaction", &[json!(txid.clone()), json!(null), json!(true)])?;
     let decoded = tx_info["decoded"].clone();
-    let blockheight = tx_info["blockheight"].as_i64().unwrap();
-    let blockhash = tx_info["blockhash"].as_str().unwrap();
-    let fee = tx_info["fee"].as_f64().unwrap();
+    let blockheight = tx_info["blockheight"].as_i64().unwrap_or(0);
+    let blockhash = tx_info["blockhash"].as_str().unwrap_or("unknown");
+    let fee = tx_info["fee"].as_f64().unwrap_or(0.0);
 
-    // Find input address and amount
+    // Find input address and amount - get actual input transaction details
     let vin = decoded["vin"].as_array().unwrap();
-    let miner_input_address = vin[0]["prevout"]["scriptPubKey"]["address"].as_str().unwrap();
-    let miner_input_amount = vin[0]["prevout"]["value"].as_f64().unwrap();
+    let input_txid = vin[0]["txid"].as_str().unwrap();
+    let input_vout = vin[0]["vout"].as_u64().unwrap() as usize;
+    
+    // Get the previous transaction to find the input details
+    let input_tx = miner_rpc.call::<serde_json::Value>("gettransaction", &[json!(input_txid), json!(null), json!(true)])?;
+    let input_decoded = input_tx["decoded"].clone();
+    let input_vouts = input_decoded["vout"].as_array().unwrap();
+    let input_vout_obj = &input_vouts[input_vout];
+    
+    // Safely extract input address and amount
+    let miner_input_address = if let Some(addr_val) = input_vout_obj["scriptPubKey"].get("address") {
+        if let Some(addr_str) = addr_val.as_str() {
+            addr_str.to_string()
+        } else {
+            input_vout_obj["scriptPubKey"]["asm"].as_str().unwrap_or("unknown").to_string()
+        }
+    } else {
+        input_vout_obj["scriptPubKey"]["asm"].as_str().unwrap_or("unknown").to_string()
+    };
+    
+    let miner_input_amount = input_vout_obj["value"].as_f64().unwrap_or(0.0);
 
-    // Find output addresses and amounts
+    // Find output addresses and amounts - handle all edge cases safely
     let vout = decoded["vout"].as_array().unwrap();
     let mut trader_output_address = "";
     let mut trader_output_amount = 0.0;
     let mut miner_change_address = "";
     let mut miner_change_amount = 0.0;
+    
     for out in vout {
-        let addr = out["scriptPubKey"]["address"].as_str().unwrap();
-        let value = out["value"].as_f64().unwrap();
-        if addr == trader_addr {
-            trader_output_address = addr;
-            trader_output_amount = value;
-        } else if addr == mining_addr {
-            miner_change_address = addr;
-            miner_change_amount = value;
+        // Only process outputs with valid value field
+        if let Some(value) = out.get("value").and_then(|v| v.as_f64()) {
+            // Only process outputs with valid address field
+            if let Some(addr_val) = out["scriptPubKey"].get("address") {
+                if let Some(addr) = addr_val.as_str() {
+                    if addr == trader_addr {
+                        trader_output_address = addr;
+                        trader_output_amount = value;
+                    } else if addr != trader_addr {
+                        // Any address that's not the trader address is considered change
+                        miner_change_address = addr;
+                        miner_change_amount = value;
+                    }
+                }
+            }
         }
     }
 
