@@ -41,25 +41,102 @@ fn main() -> bitcoincore_rpc::Result<()> {
         Auth::UserPass(RPC_USER.to_owned(), RPC_PASS.to_owned()),
     )?;
 
-    // Get blockchain info
-    let blockchain_info = rpc.get_blockchain_info()?;
-    println!("Blockchain Info: {:?}", blockchain_info);
+    // Helper to call wallet-specific RPC
+    let miner_rpc = Client::new(
+        &format!("{}/wallet/Miner", RPC_URL),
+        Auth::UserPass(RPC_USER.to_owned(), RPC_PASS.to_owned()),
+    )?;
+    let trader_rpc = Client::new(
+        &format!("{}/wallet/Trader", RPC_URL),
+        Auth::UserPass(RPC_USER.to_owned(), RPC_PASS.to_owned()),
+    )?;
 
-    // Create/Load the wallets, named 'Miner' and 'Trader'. Have logic to optionally create/load them if they do not exist or not loaded already.
+    // 1. Create/load wallets
+    for wallet in ["Miner", "Trader"] {
+        let res = rpc.call::<serde_json::Value>("createwallet", &[json!(wallet)]);
+        if let Err(e) = &res {
+            if !e.to_string().contains("already exists") {
+                panic!("Failed to create wallet: {}", e);
+            }
+            // Try loading if not loaded
+            let _ = rpc.call::<serde_json::Value>("loadwallet", &[json!(wallet)]);
+        }
+    }
 
-    // Generate spendable balances in the Miner wallet. How many blocks needs to be mined?
+    // 2. Generate address for mining reward in Miner wallet
+    let mining_addr = miner_rpc.call::<String>("getnewaddress", &[json!("Mining Reward")])?;
 
-    // Load Trader wallet and generate a new address
+    // 3. Mine blocks until positive balance
+    // Coinbase rewards require 100 blocks to mature before spendable
+    let mut blocks_mined = 0;
+    let mut miner_balance = miner_rpc.get_balance(None, None)?;
+    while miner_balance.to_btc() <= 0.0 {
+        miner_rpc.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mining_addr.clone())])?;
+        blocks_mined += 1;
+        miner_balance = miner_rpc.get_balance(None, None)?;
+    }
+    // Coinbase rewards are only spendable after 100 blocks (maturity)
+    // This is to prevent chain reorganizations from invalidating coinbase spends.
 
-    // Send 20 BTC from Miner to Trader
+    println!("Blocks mined until positive balance: {}", blocks_mined);
+    println!("Miner wallet balance: {} BTC", miner_balance.to_btc());
 
-    // Check transaction in mempool
+    // 4. Generate Trader receiving address
+    let trader_addr = trader_rpc.call::<String>("getnewaddress", &[json!("Received")])?;
 
-    // Mine 1 block to confirm the transaction
+    // 5. Send 20 BTC from Miner to Trader
+    let txid = miner_rpc.call::<String>("sendtoaddress", &[json!(trader_addr.clone()), json!(20.0)])?;
+    println!("Sent 20 BTC from Miner to Trader. TXID: {}", txid);
 
-    // Extract all required transaction details
+    // 6. Fetch unconfirmed transaction from mempool
+    let mempool_entry = miner_rpc.call::<serde_json::Value>("getmempoolentry", &[json!(txid.clone())])?;
+    println!("Mempool entry: {:?}", mempool_entry);
 
-    // Write the data to ../out.txt in the specified format given in readme.md
+    // 7. Mine 1 block to confirm transaction
+    miner_rpc.call::<Vec<String>>("generatetoaddress", &[json!(1), json!(mining_addr.clone())])?;
+
+    // 8. Extract transaction details
+    let tx_info = miner_rpc.call::<serde_json::Value>("gettransaction", &[json!(txid.clone()), json!(null), json!(true)])?;
+    let decoded = tx_info["decoded"].clone();
+    let blockheight = tx_info["blockheight"].as_i64().unwrap();
+    let blockhash = tx_info["blockhash"].as_str().unwrap();
+    let fee = tx_info["fee"].as_f64().unwrap();
+
+    // Find input address and amount
+    let vin = decoded["vin"].as_array().unwrap();
+    let miner_input_address = vin[0]["prevout"]["scriptPubKey"]["address"].as_str().unwrap();
+    let miner_input_amount = vin[0]["prevout"]["value"].as_f64().unwrap();
+
+    // Find output addresses and amounts
+    let vout = decoded["vout"].as_array().unwrap();
+    let mut trader_output_address = "";
+    let mut trader_output_amount = 0.0;
+    let mut miner_change_address = "";
+    let mut miner_change_amount = 0.0;
+    for out in vout {
+        let addr = out["scriptPubKey"]["address"].as_str().unwrap();
+        let value = out["value"].as_f64().unwrap();
+        if addr == trader_addr {
+            trader_output_address = addr;
+            trader_output_amount = value;
+        } else if addr == mining_addr {
+            miner_change_address = addr;
+            miner_change_amount = value;
+        }
+    }
+
+    // 9. Write output to ../out.txt
+    let mut file = File::create("../out.txt").expect("Unable to create out.txt");
+    writeln!(file, "{}", txid)?;
+    writeln!(file, "{}", miner_input_address)?;
+    writeln!(file, "{}", miner_input_amount)?;
+    writeln!(file, "{}", trader_output_address)?;
+    writeln!(file, "{}", trader_output_amount)?;
+    writeln!(file, "{}", miner_change_address)?;
+    writeln!(file, "{}", miner_change_amount)?;
+    writeln!(file, "{}", fee)?;
+    writeln!(file, "{}", blockheight)?;
+    writeln!(file, "{}", blockhash)?;
 
     Ok(())
 }
